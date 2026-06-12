@@ -115,24 +115,185 @@ function createWindow() {
   });
 }
 
-async function tintIconClaudeOrange(srcPath: string): Promise<Electron.NativeImage | null> {
-  // Re-color the template silhouette to Claude orange (#d97706) while
-  // preserving the source's alpha mask (= original icon shape).
+function gaugeColorAt(t: number): { r: number; g: number; b: number } {
+  // t in [0, 1] — green (#22c55e) → yellow (#eab308) → red (#ef4444)
+  const clamped = Math.max(0, Math.min(1, t));
+  if (clamped < 0.5) {
+    const k = clamped / 0.5;
+    return {
+      r: Math.round(34 + (234 - 34) * k),
+      g: Math.round(197 + (179 - 197) * k),
+      b: Math.round(94 + (8 - 94) * k),
+    };
+  }
+  const k = (clamped - 0.5) / 0.5;
+  return {
+    r: Math.round(234 + (239 - 234) * k),
+    g: Math.round(179 + (68 - 179) * k),
+    b: Math.round(8 + (68 - 8) * k),
+  };
+}
+
+function buildBorderBuffer(W: number, H: number): Buffer {
+  // 1px dark border around the icon's bounding rect to make it pop on busy
+  // panel backgrounds.
+  const buf = Buffer.alloc(W * H * 4);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const onEdge = x === 0 || y === 0 || x === W - 1 || y === H - 1;
+      if (!onEdge) continue;
+      buf[i] = 0;
+      buf[i + 1] = 0;
+      buf[i + 2] = 0;
+      buf[i + 3] = 220;
+    }
+  }
+  return buf;
+}
+
+function buildGaugeStripBuffer(
+  percentage: number,
+  W: number,
+  H: number,
+  stripH: number
+): Buffer {
+  // Slim horizontal gauge anchored to the bottom of the icon. Filled portion
+  // is a green→red gradient; the unfilled track is dark.
+  const buf = Buffer.alloc(W * H * 4);
+  const stripY = H - stripH - 1; // leave 1px gap above the bottom border
+  const padX = 2;
+  const innerW = W - padX * 2;
+  const fillW = Math.max(
+    0,
+    Math.min(innerW, Math.round((percentage / 100) * innerW))
+  );
+  for (let y = stripY; y < stripY + stripH; y++) {
+    for (let x = padX; x < W - padX; x++) {
+      const i = (y * W + x) * 4;
+      const innerX = x - padX;
+      if (innerX < fillW) {
+        const c = gaugeColorAt(innerX / Math.max(1, innerW - 1));
+        buf[i] = c.r;
+        buf[i + 1] = c.g;
+        buf[i + 2] = c.b;
+        buf[i + 3] = 255;
+      } else {
+        buf[i] = 0x33;
+        buf[i + 1] = 0x33;
+        buf[i + 2] = 0x33;
+        buf[i + 3] = 220;
+      }
+    }
+  }
+  return buf;
+}
+
+let baseTrayIcon: Electron.NativeImage | null = null;
+
+async function buildGaugeOverlayIcon(
+  percentage: number
+): Promise<Electron.NativeImage> {
+  if (!baseTrayIcon || baseTrayIcon.isEmpty()) {
+    return nativeImage.createFromBuffer(
+      buildGaugeStripBuffer(percentage, 44, 22, 6),
+      { width: 44, height: 22 }
+    );
+  }
+  const size = baseTrayIcon.getSize();
+  const W = size.width;
+  const H = size.height;
+  // Gauge strip ~22% of icon height (e.g. 7px on a 32px icon, 5px on 22px)
+  const stripH = Math.max(4, Math.round(H * 0.22));
+  const gauge = buildGaugeStripBuffer(percentage, W, H, stripH);
+  const border = buildBorderBuffer(W, H);
   try {
     const sharp = (await import('sharp')).default;
-    const meta = await sharp(srcPath).metadata();
-    const width = meta.width ?? 32;
-    const height = meta.height ?? 32;
-    const alpha = await sharp(srcPath).extractChannel('alpha').raw().toBuffer();
-    const tinted = await sharp({
-      create: { width, height, channels: 3, background: { r: 217, g: 119, b: 6 } },
-    })
-      .joinChannel(alpha, { raw: { width, height, channels: 1 } })
+    const basePng = baseTrayIcon.toPNG();
+    const composed = await sharp(basePng)
+      .composite([
+        {
+          input: gauge,
+          raw: { width: W, height: H, channels: 4 },
+          blend: 'over',
+        },
+        {
+          input: border,
+          raw: { width: W, height: H, channels: 4 },
+          blend: 'over',
+        },
+      ])
       .png()
       .toBuffer();
-    return nativeImage.createFromBuffer(tinted);
+    return nativeImage.createFromBuffer(composed);
   } catch (err) {
-    console.error('Tray icon tint failed:', err);
+    console.error('Gauge overlay composite failed:', err);
+    return baseTrayIcon;
+  }
+}
+
+async function updateTrayGauge(
+  usage: { bars?: Array<{ percentage: number }> } | null
+) {
+  if (!tray) return;
+  const pct =
+    usage?.bars && usage.bars.length > 0
+      ? Math.max(...usage.bars.map(b => b.percentage || 0))
+      : 0;
+  try {
+    const composed = await buildGaugeOverlayIcon(pct);
+    tray.setImage(composed);
+    tray.setToolTip(`Claude Usage: ${Math.round(pct)}%`);
+  } catch (err) {
+    console.error('Failed to update tray gauge:', err);
+  }
+}
+
+function claudeBurstSvg(
+  canvasSize: number,
+  burstSize: number,
+  centerY: number,
+  color = '#d97706'
+): string {
+  // Claude-style radial burst: 8 lens-shaped rays at 45° increments, with the
+  // cardinal rays longer than the diagonals. Drawn centered at (canvasSize/2,
+  // centerY) so we can leave room for the gauge strip at the bottom.
+  const cx = canvasSize / 2;
+  const longR = burstSize * 0.46;
+  const shortR = burstSize * 0.32;
+  const wideHalf = burstSize * 0.07;
+  const narrowHalf = burstSize * 0.05;
+  function ray(angle: number, r: number, halfW: number): string {
+    return (
+      `<path d="M0,0 C${halfW},-${r * 0.55} ${halfW},-${r * 0.85} 0,-${r} ` +
+      `C-${halfW},-${r * 0.85} -${halfW},-${r * 0.55} 0,0 Z" ` +
+      `transform="rotate(${angle})" />`
+    );
+  }
+  const rays: string[] = [];
+  for (let i = 0; i < 4; i++) rays.push(ray(i * 90, longR, wideHalf));
+  for (let i = 0; i < 4; i++) rays.push(ray(45 + i * 90, shortR, narrowHalf));
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${canvasSize}" height="${canvasSize}" viewBox="0 0 ${canvasSize} ${canvasSize}">` +
+    `<g transform="translate(${cx} ${centerY})" fill="${color}">` +
+    rays.join('') +
+    `</g></svg>`
+  );
+}
+
+async function renderClaudeBurstIcon(size: number): Promise<Electron.NativeImage | null> {
+  try {
+    const sharp = (await import('sharp')).default;
+    // Reserve the bottom ~25% of the canvas for the gauge strip + border gap;
+    // shrink the burst to fit the remaining top area and center it there.
+    const reserveBottom = Math.round(size * 0.28);
+    const burstArea = size - reserveBottom - 2; // 2px top padding
+    const centerY = 1 + burstArea / 2;
+    const svg = Buffer.from(claudeBurstSvg(size, burstArea, centerY));
+    const png = await sharp(svg, { density: 288 }).resize(size, size).png().toBuffer();
+    return nativeImage.createFromBuffer(png);
+  } catch (err) {
+    console.error('Burst icon render failed:', err);
     return null;
   }
 }
@@ -149,15 +310,19 @@ async function createTray() {
 
   try {
     if (isLinux) {
-      // Linux StatusNotifier doesn't auto-invert template images — tint to
-      // Claude orange so it stays visible against any panel background.
-      const tinted = await tintIconClaudeOrange(iconPath);
-      icon = tinted ?? nativeImage.createFromPath(iconPath);
+      // Linux StatusNotifier doesn't auto-invert template images — render the
+      // Claude burst mark in orange so it stays visible against any panel.
+      const burst = await renderClaudeBurstIcon(32);
+      icon = burst ?? nativeImage.createFromPath(iconPath);
     } else {
       icon = nativeImage.createFromPath(iconPath);
     }
     if (icon.isEmpty()) {
       icon = nativeImage.createEmpty();
+    } else {
+      // Cache the base icon so updateTrayGauge can composite the gauge overlay
+      // on top of it later, keeping the Claude logo visible underneath.
+      baseTrayIcon = icon;
     }
   } catch {
     icon = nativeImage.createEmpty();
@@ -367,6 +532,8 @@ async function refreshAllData() {
         return null;
       }),
     ]);
+
+    await updateTrayGauge(claudeUsage);
 
     mainWindow.webContents.send('app:data-updated', {
       claudeUsage,
