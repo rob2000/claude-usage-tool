@@ -236,14 +236,15 @@ async function updateTrayGauge(
   usage: { bars?: Array<{ percentage: number }> } | null
 ) {
   if (!tray) return;
-  const pct =
-    usage?.bars && usage.bars.length > 0
-      ? Math.max(...usage.bars.map(b => b.percentage || 0))
-      : 0;
+  // Skip refreshes that returned no data (scrape in progress, auth failure,
+  // etc.) — keep showing the last known good gauge instead of dropping to 0%.
+  if (!usage?.bars || usage.bars.length === 0) return;
+  const sessionBar = usage.bars[0];
+  const pct = sessionBar?.percentage || 0;
   try {
     const composed = await buildGaugeOverlayIcon(pct);
     tray.setImage(composed);
-    tray.setToolTip(`Claude Usage: ${Math.round(pct)}%`);
+    tray.setToolTip(`Claude session usage: ${Math.round(pct)}%`);
   } catch (err) {
     console.error('Failed to update tray gauge:', err);
   }

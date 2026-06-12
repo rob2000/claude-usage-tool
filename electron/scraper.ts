@@ -359,6 +359,9 @@ export async function scrapeClaudeUsage(): Promise<ClaudeMaxUsage | null> {
         if (result) {
           const parsed = JSON.parse(result);
           console.log('Parsed usage data - bars:', parsed.bars?.length, 'auth:', parsed.isAuthenticated);
+          if (parsed.bars?.length) {
+            console.log('Bars detail:', JSON.stringify(parsed.bars, null, 2));
+          }
           if (!parsed.bars?.length && parsed.isAuthenticated) {
             console.log('--- RAW PAGE TEXT (around first %) ---');
             console.log(parsed.rawText);
