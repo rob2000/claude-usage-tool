@@ -138,8 +138,23 @@ export async function scrapeClaudeUsage(): Promise<ClaudeMaxUsage | null> {
         return;
       }
 
-      // Wait for JavaScript to render the usage data
-      await new Promise(r => setTimeout(r, 3000));
+      // Poll for the usage panel to render — SPA route may take a while to mount.
+      // Look for any "% used" / "% verbraucht" marker before giving up.
+      const pollStart = Date.now();
+      const POLL_TIMEOUT = 15000;
+      const POLL_INTERVAL = 500;
+      while (Date.now() - pollStart < POLL_TIMEOUT) {
+        if (resolved || !scraperWindow || scraperWindow.isDestroyed()) return;
+        try {
+          const ready = await scraperWindow.webContents.executeJavaScript(
+            `/(\\d+)\\s*%\\s*(used|verbraucht|utilisé|usado|usati|使用)/i.test(document.body.innerText)`
+          );
+          if (ready) break;
+        } catch {
+          // window may have been disposed; loop will exit on next check
+        }
+        await new Promise(r => setTimeout(r, POLL_INTERVAL));
+      }
 
       // Check again after waiting
       if (resolved || !scraperWindow || scraperWindow.isDestroyed()) return;
@@ -167,7 +182,16 @@ export async function scrapeClaudeUsage(): Promise<ClaudeMaxUsage | null> {
             }
 
             const text = document.body.innerText;
-            usage.rawText = text.substring(0, 2000);
+            // Capture the section around any % marker — that's where the usage data lives,
+            // not the top 2000 chars (which on claude.ai is the sidebar of chat history).
+            const pctIdx = text.search(/\\d+\\s*%/);
+            if (pctIdx >= 0) {
+              const start = Math.max(0, pctIdx - 400);
+              const end = Math.min(text.length, pctIdx + 2000);
+              usage.rawText = text.substring(start, end);
+            } else {
+              usage.rawText = text.substring(0, 2000);
+            }
 
             // Parse the structured usage sections from Claude's settings page
             // The page structure is:
@@ -189,7 +213,18 @@ export async function scrapeClaudeUsage(): Promise<ClaudeMaxUsage | null> {
               'Daily limit',
               'Monthly limit',
               'Standard',
-              'Advanced'
+              'Advanced',
+              // German
+              'Aktuelle Sitzung',
+              'Aktuelle Session',
+              'Alle Modelle',
+              'Nur Sonnet',
+              'Sonnet nur',
+              'Zusätzliche Nutzung',
+              'Wöchentliches Limit',
+              'Wöchentliche Limits',
+              'Tägliches Limit',
+              'Monatliches Limit'
             ];
 
             for (let i = 0; i < lines.length; i++) {
@@ -209,13 +244,14 @@ export async function scrapeClaudeUsage(): Promise<ClaudeMaxUsage | null> {
                 for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
                   const nextLine = lines[j];
 
-                  // Look for "Resets ..." pattern
-                  if (nextLine.toLowerCase().startsWith('reset')) {
+                  // Look for "Resets ..." / "Zurücksetzung ..." pattern
+                  const lowered = nextLine.toLowerCase();
+                  if (lowered.startsWith('reset') || lowered.startsWith('zurücksetzung')) {
                     resetInfo = nextLine;
                   }
 
                   // Look for "X% used" pattern
-                  const pctMatch = nextLine.match(/(\\d+)%\\s*used/i);
+                  const pctMatch = nextLine.match(/(\\d+)\\s*%\\s*(used|verbraucht|genutzt|verwendet)/i);
                   if (pctMatch) {
                     percentage = parseInt(pctMatch[1], 10);
                     break; // Found the percentage, stop looking
@@ -225,7 +261,10 @@ export async function scrapeClaudeUsage(): Promise<ClaudeMaxUsage | null> {
                 // Only add if we found meaningful data
                 if (percentage >= 0 || resetInfo) {
                   // Skip "Weekly limits" header if we have individual models
-                  if (line.toLowerCase() === 'weekly limits') continue;
+                  const lcLine = line.toLowerCase();
+                  if (lcLine === 'weekly limits' || lcLine === 'wöchentliche limits' || lcLine === 'wöchentliches limit') continue;
+                  // Skip if no percentage was actually found (header-only entries like "Wöchentliche Limits")
+                  if (percentage === 0 && !resetInfo) continue;
 
                   usage.bars.push({
                     value: percentage,
@@ -240,7 +279,7 @@ export async function scrapeClaudeUsage(): Promise<ClaudeMaxUsage | null> {
 
             // Fallback: if no bars found, try to find percentages
             if (usage.bars.length === 0) {
-              const percentMatches = text.matchAll(/(\\d+)\\s*%\\s*used/gi);
+              const percentMatches = text.matchAll(/(\\d+)\\s*%\\s*(used|verbraucht|genutzt|verwendet)/gi);
               let idx = 0;
               const defaultLabels = ['Current Session', 'All models', 'Sonnet only', 'Extra usage'];
 
@@ -285,25 +324,21 @@ export async function scrapeClaudeUsage(): Promise<ClaudeMaxUsage | null> {
               }
             }
 
-            // Try to extract plan name (Max, Pro, Free, etc.)
+            // Try to extract plan name (Max, Pro, Team, Free, etc.)
             const planPatterns = [
               /Claude\\s+(Max|Pro|Team|Enterprise|Free)/i,
               /(Max|Pro|Team|Enterprise)\\s+Plan/i,
-              /Plan:\\s*(Max|Pro|Team|Enterprise|Free)/i
+              /Plan:\\s*(Max|Pro|Team|Enterprise|Free)/i,
+              // Plan badge rendered right next to the usage-limits header
+              // ("Your usage limits  Team" / "Deine Nutzungslimits  Team").
+              /(?:Your\\s+usage\\s+limits|Deine\\s+Nutzungslimits)[\\s\\S]{0,40}?\\b(Max|Team|Pro|Enterprise|Free)\\b/i,
+              /\\b(Max|Team|Pro|Enterprise|Free)\\b[\\s\\S]{0,40}?(?:Your\\s+usage\\s+limits|Deine\\s+Nutzungslimits)/i
             ];
             for (const pattern of planPatterns) {
               const match = text.match(pattern);
               if (match) {
                 usage.plan = match[1];
                 break;
-              }
-            }
-            // Fallback: check for plan indicators in the page
-            if (!usage.plan) {
-              if (text.includes('Extra usage') || text.includes('All models')) {
-                usage.plan = 'Max';
-              } else if (text.includes('Pro features')) {
-                usage.plan = 'Pro';
               }
             }
 
@@ -324,6 +359,11 @@ export async function scrapeClaudeUsage(): Promise<ClaudeMaxUsage | null> {
         if (result) {
           const parsed = JSON.parse(result);
           console.log('Parsed usage data - bars:', parsed.bars?.length, 'auth:', parsed.isAuthenticated);
+          if (!parsed.bars?.length && parsed.isAuthenticated) {
+            console.log('--- RAW PAGE TEXT (around first %) ---');
+            console.log(parsed.rawText);
+            console.log('--- END RAW PAGE TEXT ---');
+          }
 
           resolved = true;
           isScrapingUsage = false;

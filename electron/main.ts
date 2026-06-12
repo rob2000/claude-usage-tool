@@ -81,14 +81,17 @@ function getRecentLogs(count: number = 6): LogEntry[] {
 }
 
 function createWindow() {
+  const isLinux = process.platform === 'linux';
   mainWindow = new BrowserWindow({
-    width: 320,
-    height: 480,
+    width: 400,
+    height: 600,
     show: false,
     frame: false,
     resizable: false,
     skipTaskbar: true,
-    transparent: true,
+    transparent: !isLinux,
+    backgroundColor: isLinux ? '#1a1a1a' : undefined,
+    type: isLinux ? 'toolbar' : undefined,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -112,15 +115,48 @@ function createWindow() {
   });
 }
 
-function createTray() {
-  // Create a simple icon - in production, use a proper icon file
-  const iconPath = path.join(__dirname, '..', 'assets', 'trayIconTemplate.png');
+async function tintIconClaudeOrange(srcPath: string): Promise<Electron.NativeImage | null> {
+  // Re-color the template silhouette to Claude orange (#d97706) while
+  // preserving the source's alpha mask (= original icon shape).
+  try {
+    const sharp = (await import('sharp')).default;
+    const meta = await sharp(srcPath).metadata();
+    const width = meta.width ?? 32;
+    const height = meta.height ?? 32;
+    const alpha = await sharp(srcPath).extractChannel('alpha').raw().toBuffer();
+    const tinted = await sharp({
+      create: { width, height, channels: 3, background: { r: 217, g: 119, b: 6 } },
+    })
+      .joinChannel(alpha, { raw: { width, height, channels: 1 } })
+      .png()
+      .toBuffer();
+    return nativeImage.createFromBuffer(tinted);
+  } catch (err) {
+    console.error('Tray icon tint failed:', err);
+    return null;
+  }
+}
+
+async function createTray() {
+  const isLinux = process.platform === 'linux';
+  const iconPath = path.join(
+    __dirname,
+    '..',
+    'assets',
+    isLinux ? 'trayIconTemplate@2x.png' : 'trayIconTemplate.png'
+  );
   let icon: Electron.NativeImage;
 
   try {
-    icon = nativeImage.createFromPath(iconPath);
+    if (isLinux) {
+      // Linux StatusNotifier doesn't auto-invert template images — tint to
+      // Claude orange so it stays visible against any panel background.
+      const tinted = await tintIconClaudeOrange(iconPath);
+      icon = tinted ?? nativeImage.createFromPath(iconPath);
+    } else {
+      icon = nativeImage.createFromPath(iconPath);
+    }
     if (icon.isEmpty()) {
-      // Fallback: create a simple 16x16 icon
       icon = nativeImage.createEmpty();
     }
   } catch {
@@ -222,6 +258,17 @@ function createTray() {
   tray.on('right-click', () => {
     tray?.popUpContextMenu(contextMenu);
   });
+
+  // Linux AppIndicators don't fire 'click' — bind the menu so left-click works,
+  // and prepend an entry to open the popup window.
+  if (process.platform === 'linux') {
+    const linuxMenu = Menu.buildFromTemplate([
+      { label: 'Open', click: () => showWindow() },
+      { type: 'separator' },
+      ...contextMenu.items.map(item => item),
+    ]);
+    tray.setContextMenu(linuxMenu);
+  }
 }
 
 function showWindow() {
@@ -232,22 +279,49 @@ function showWindow() {
 
   const trayBounds = tray.getBounds();
   const windowBounds = mainWindow.getBounds();
-  const display = screen.getDisplayNearestPoint({ x: trayBounds.x, y: trayBounds.y });
 
   console.log('Tray bounds:', trayBounds);
   console.log('Window bounds:', windowBounds);
-  console.log('Display bounds:', display.bounds);
 
-  // Position window below tray icon (macOS style)
-  let x = Math.round(trayBounds.x + trayBounds.width / 2 - windowBounds.width / 2);
-  let y = Math.round(trayBounds.y + trayBounds.height + 4);
+  // On Linux, tray.getBounds() returns zeros — anchor to the cursor instead,
+  // which is reliably near the tray icon at click time.
+  const useCursorAnchor =
+    process.platform === 'linux' ||
+    (trayBounds.width === 0 && trayBounds.height === 0);
 
-  // Ensure window is within display bounds
-  if (x + windowBounds.width > display.bounds.x + display.bounds.width) {
-    x = display.bounds.x + display.bounds.width - windowBounds.width;
+  let anchor: { x: number; y: number };
+  if (useCursorAnchor) {
+    anchor = screen.getCursorScreenPoint();
+  } else {
+    anchor = {
+      x: trayBounds.x + trayBounds.width / 2,
+      y: trayBounds.y + trayBounds.height,
+    };
   }
-  if (x < display.bounds.x) {
-    x = display.bounds.x;
+
+  const display = screen.getDisplayNearestPoint(anchor);
+  const workArea = display.workArea;
+  console.log('Anchor:', anchor, 'WorkArea:', workArea);
+
+  let x = Math.round(anchor.x - windowBounds.width / 2);
+  let y: number;
+  if (useCursorAnchor) {
+    // Snap to the top or bottom of the work area depending on where the
+    // panel sits (panel at top → workArea.y > display.bounds.y).
+    const panelAtTop = workArea.y > display.bounds.y;
+    y = panelAtTop
+      ? workArea.y + 4
+      : workArea.y + workArea.height - windowBounds.height - 4;
+  } else {
+    y = Math.round(anchor.y + 4);
+  }
+
+  // Clamp to work area
+  if (x + windowBounds.width > workArea.x + workArea.width) {
+    x = workArea.x + workArea.width - windowBounds.width;
+  }
+  if (x < workArea.x) {
+    x = workArea.x;
   }
 
   mainWindow.setPosition(x, y, false);
@@ -403,9 +477,9 @@ ipcMain.handle('app:get-admin-key-status', () => {
 });
 
 // App lifecycle
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   createWindow();
-  createTray();
+  await createTray();
   startAutoRefresh();
 
   app.on('activate', () => {

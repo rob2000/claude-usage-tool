@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "electron:dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json -w\" \"wait-on tcp:5173 && electron .\"",
+    "electron:dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json -w\" \"wait-on tcp:5173 dist-electron/main.js && electron .\"",
     "electron:build": "npm run build && tsc -p tsconfig.electron.json && electron-builder --mac",
     "start": "electron .",
     "lint": "eslint . --ext ts,tsx"
@@ -15,7 +15,8 @@
     "dotenv": "^16.3.1",
     "electron-store": "^8.1.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "@types/react": "^18.2.45",
@@ -24,7 +25,6 @@
     "concurrently": "^8.2.2",
     "electron": "^28.1.0",
     "electron-builder": "^24.13.3",
-    "sharp": "^0.34.5",
     "typescript": "^5.3.3",
     "vite": "^5.0.10",
     "wait-on": "^7.2.0"
