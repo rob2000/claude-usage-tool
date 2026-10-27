@@ -38,6 +38,15 @@ If you're a Claude power user, you've probably found yourself:
   <img src="Claude%20Usage%20Tool%202.png" alt="Claude Usage Tool Screenshot">
 </p>
 
+### Linux
+
+On Linux (here Cinnamon) the tray icon is the Claude burst with a gauge for the current session underneath, and the
+usage page is read in German as well as English.
+
+<p align="center">
+  <img src="Claude%20Usage%20Tool%20Linux.png" alt="Claude Usage Tool on Linux">
+</p>
+
 ## Installation
 
 ### Prerequisites
