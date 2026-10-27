@@ -244,9 +244,10 @@ export async function scrapeClaudeUsage(): Promise<ClaudeMaxUsage | null> {
                 for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
                   const nextLine = lines[j];
 
-                  // Look for "Resets ..." / "Zurücksetzung ..." pattern
+                  // Look for "Resets ..." / "Zurücksetzung am ..." / "Wird um 14:00 zurückgesetzt" pattern
                   const lowered = nextLine.toLowerCase();
-                  if (lowered.startsWith('reset') || lowered.startsWith('zurücksetzung')) {
+                  if (lowered.startsWith('reset') || lowered.startsWith('zurücksetzung') ||
+                      (lowered.startsWith('wird ') && lowered.endsWith('zurückgesetzt'))) {
                     resetInfo = nextLine;
                   }
 
