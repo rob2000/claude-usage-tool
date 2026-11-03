@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "tsc -p tsconfig.electron.json && node --test tests/usageParser.test.cjs",
     "electron:dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json -w\" \"wait-on tcp:5173 dist-electron/main.js && electron .\"",
     "electron:build": "npm run build && tsc -p tsconfig.electron.json && electron-builder --mac",
     "start": "electron .",

@@ -233,14 +233,18 @@ async function buildGaugeOverlayIcon(
 }
 
 async function updateTrayGauge(
-  usage: { bars?: Array<{ percentage: number }> } | null
+  usage: { bars?: Array<{ percentage: number; label?: string }> } | null
 ) {
   if (!tray) return;
   // Skip refreshes that returned no data (scrape in progress, auth failure,
   // etc.) — keep showing the last known good gauge instead of dropping to 0%.
   if (!usage?.bars || usage.bars.length === 0) return;
-  const sessionBar = usage.bars[0];
-  const pct = sessionBar?.percentage || 0;
+  const sessionBar = usage.bars.find(bar =>
+    /^(current session|aktuelle sitzung|aktuelle session)$/i.test(bar.label || '')
+  );
+  // A missing session reading must not turn a weekly limit into the session gauge.
+  if (!sessionBar) return;
+  const pct = sessionBar.percentage;
   try {
     const composed = await buildGaugeOverlayIcon(pct);
     tray.setImage(composed);

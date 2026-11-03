@@ -1,4 +1,5 @@
 import { BrowserWindow, session } from 'electron';
+import { parseUsageBars } from './usageParser';
 
 export interface UsageBar {
   used: number;
@@ -193,121 +194,7 @@ export async function scrapeClaudeUsage(): Promise<ClaudeMaxUsage | null> {
               usage.rawText = text.substring(0, 2000);
             }
 
-            // Parse the structured usage sections from Claude's settings page
-            // The page structure is:
-            // - Current session / Resets in X hr Y min / X% used
-            // - All models / Resets Day Time / X% used
-            // - Sonnet only / Resets Day Time / X% used
-            // - Extra usage / Resets Month Day / X% used
-
-            const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
-
-            // Define the section labels we're looking for
-            const sectionLabels = [
-              'Current session',
-              'All models',
-              'Sonnet only',
-              'Extra usage',
-              'Weekly limit',
-              'Weekly limits',
-              'Daily limit',
-              'Monthly limit',
-              'Standard',
-              'Advanced',
-              // German
-              'Aktuelle Sitzung',
-              'Aktuelle Session',
-              'Alle Modelle',
-              'Nur Sonnet',
-              'Sonnet nur',
-              'Zusätzliche Nutzung',
-              'Wöchentliches Limit',
-              'Wöchentliche Limits',
-              'Tägliches Limit',
-              'Monatliches Limit'
-            ];
-
-            for (let i = 0; i < lines.length; i++) {
-              const line = lines[i];
-
-              // Check if this line matches a section label (case insensitive)
-              const isLabel = sectionLabels.some(label =>
-                line.toLowerCase() === label.toLowerCase()
-              );
-
-              if (isLabel) {
-                const label = line;
-                let percentage = 0;
-                let resetInfo = '';
-
-                // Look at next few lines for reset info and percentage
-                for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
-                  const nextLine = lines[j];
-
-                  // Look for "Resets ..." / "Zurücksetzung am ..." / "Wird um 14:00 zurückgesetzt" pattern
-                  const lowered = nextLine.toLowerCase();
-                  if (lowered.startsWith('reset') || lowered.startsWith('zurücksetzung') ||
-                      (lowered.startsWith('wird ') && lowered.endsWith('zurückgesetzt'))) {
-                    resetInfo = nextLine;
-                  }
-
-                  // Look for "X% used" pattern
-                  const pctMatch = nextLine.match(/(\\d+)\\s*%\\s*(used|verbraucht|genutzt|verwendet)/i);
-                  if (pctMatch) {
-                    percentage = parseInt(pctMatch[1], 10);
-                    break; // Found the percentage, stop looking
-                  }
-                }
-
-                // Only add if we found meaningful data
-                if (percentage >= 0 || resetInfo) {
-                  // Skip "Weekly limits" header if we have individual models
-                  const lcLine = line.toLowerCase();
-                  if (lcLine === 'weekly limits' || lcLine === 'wöchentliche limits' || lcLine === 'wöchentliches limit') continue;
-                  // Skip if no percentage was actually found (header-only entries like "Wöchentliche Limits")
-                  if (percentage === 0 && !resetInfo) continue;
-
-                  usage.bars.push({
-                    value: percentage,
-                    max: 100,
-                    label: label,
-                    resetInfo: resetInfo,
-                    percentage: percentage
-                  });
-                }
-              }
-            }
-
-            // Fallback: if no bars found, try to find percentages
-            if (usage.bars.length === 0) {
-              const percentMatches = text.matchAll(/(\\d+)\\s*%\\s*(used|verbraucht|genutzt|verwendet)/gi);
-              let idx = 0;
-              const defaultLabels = ['Current Session', 'All models', 'Sonnet only', 'Extra usage'];
-
-              for (const match of percentMatches) {
-                const pct = parseInt(match[1], 10);
-                if (pct >= 0 && pct <= 100) {
-                  const exists = usage.bars.some(b => Math.abs(b.percentage - pct) < 1);
-                  if (!exists) {
-                    const matchIndex = match.index || 0;
-                    const contextStart = Math.max(0, matchIndex - 100);
-                    const contextEnd = Math.min(text.length, matchIndex + 100);
-                    const context = text.substring(contextStart, contextEnd);
-
-                    const resetMatch = context.match(/Resets?[^\\n]*/i);
-
-                    usage.bars.push({
-                      value: pct,
-                      max: 100,
-                      label: defaultLabels[idx] || 'Usage ' + (idx + 1),
-                      resetInfo: resetMatch ? resetMatch[0].trim() : '',
-                      percentage: pct
-                    });
-                    idx++;
-                  }
-                }
-              }
-            }
+            usage.bars = (${parseUsageBars.toString()})(text);
 
             // Find general reset date as fallback
             const resetPatterns = [
